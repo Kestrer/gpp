@@ -1,6 +1,7 @@
 [package]
 name = "gpp"
 description = "A generic C-like preprocessor for Rust."
+repository = "https://github.com/Koxiaet/gpp"
 license = "MIT OR Apache-2.0"
 version = "0.1.0"
 authors = ["Koxiaet"]
