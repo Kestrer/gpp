@@ -2,6 +2,7 @@
 //!
 //! It supports:
 //! - Simple macros, no function macros
+//! - #include
 //! - #define
 //! - #undef
 //! - #ifdef
@@ -11,10 +12,12 @@
 //! - #else
 //! - #endif
 //!
-//! It does not support #if or #elif.
+//! #includes work differently from C, as they do not require (and do not work with) quotes or <>,
+//! so `#include file.txt` is the correct syntax. It does not support #if or #elif, and recursive
+//! macros will cause the library to get stuck.
 //!
 //! This library is heavily inspired by [minipre](https://docs.rs/minipre/0.2.0/minipre/), however
-//! this library supports more commands like #define-s and #undef-s.
+//! this library supports more commands like #define, #undef and #include.
 //!
 //! # Examples
 //!
@@ -57,14 +60,16 @@ mod tests;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::{self, BufRead};
+use std::fs;
+use std::io::{self, BufRead, Write};
 
 /// Context of the current processing.
 ///
 /// Contains a set of currently defined macros, as well as the number of nested if statements that
 /// are being ignored; this is so that if the parser failed an if statement, and it is currently
 /// ignoring data, it knows how many endifs it needs to encounter before resuming reading data
-/// again. Only if this value is 0 then the parser will read data.
+/// again. Only if this value is 0 then the parser will read data. It also stores whether the
+/// current if group has been accepted; this is for if groups with over three parts.
 ///
 /// There are no limits on what variable names can be; by directly altering Context::macros, you
 /// can set variable names not possible with #defines. However, when replacing variable names in
@@ -73,8 +78,10 @@ use std::io::{self, BufRead};
 pub struct Context {
     /// Map of all currently defined macros.
     pub macros: HashMap<String, String>,
-    /// Number of layers of inactive if statements
+    /// Number of layers of inactive if statements.
     pub inactive_stack: u32,
+    /// Whether the current if statement has been accepted.
+    pub used_if: bool,
 }
 
 impl Context {
@@ -83,6 +90,7 @@ impl Context {
         Context {
             macros: HashMap::new(),
             inactive_stack: 0,
+            used_if: false,
         }
     }
 }
@@ -102,6 +110,7 @@ pub enum Error {
     InvalidCommand { command_name: String },
     InvalidMacroName { macro_name: String },
     TooManyParameters { command: &'static str },
+    IoError(io::Error),
 }
 
 impl fmt::Display for Error {
@@ -116,11 +125,23 @@ impl fmt::Display for Error {
             Error::TooManyParameters { command } => {
                 write!(f, "Too many parameters for {}", command)
             }
+            Error::IoError(e) => write!(f, "I/O Error: {}", e),
         }
     }
 }
 
-fn process_define(line: &str, context: &mut Context) -> Result<(), Error> {
+fn process_include(line: &str, context: &mut Context) -> Result<String, Error> {
+    let file = match fs::read_to_string(line) {
+        Ok(s) => s,
+        Err(e) => return Err(Error::IoError(e)),
+    };
+    match process_str(&file, context) {
+        Ok(s) => Ok(s),
+        Err(e) => Err(e.error),
+    }
+}
+
+fn process_define(line: &str, context: &mut Context) -> Result<String, Error> {
     let (name, value) = match line.find(' ') {
         Some(index) => line.split_at(index),
         None => (line, " 1"),
@@ -130,52 +151,58 @@ fn process_define(line: &str, context: &mut Context) -> Result<(), Error> {
     context
         .macros
         .insert(String::from(name), String::from(value));
-    Ok(())
+    Ok(String::from(""))
 }
 
-fn process_undef(line: &str, context: &mut Context) -> Result<(), Error> {
+fn process_undef(line: &str, context: &mut Context) -> Result<String, Error> {
     context.macros.remove(line);
-    Ok(())
+    Ok(String::from(""))
 }
 
-fn process_ifdef(line: &str, context: &mut Context, inverted: bool) -> Result<(), Error> {
+fn process_ifdef(line: &str, context: &mut Context, inverted: bool) -> Result<String, Error> {
     if context.inactive_stack > 0 {
         context.inactive_stack += 1;
     } else if context.macros.contains_key(line) == inverted {
         context.inactive_stack = 1;
+        context.used_if = false;
+    } else {
+        context.used_if = true;
     }
-    Ok(())
+    Ok(String::from(""))
 }
 
-fn process_elifdef(line: &str, context: &mut Context, inverted: bool) -> Result<(), Error> {
+fn process_elifdef(line: &str, context: &mut Context, inverted: bool) -> Result<String, Error> {
     if context.inactive_stack == 0 {
         context.inactive_stack = 1;
-    } else if context.inactive_stack == 1 && context.macros.contains_key(line) != inverted {
+    } else if context.inactive_stack == 1
+        && !context.used_if
+        && context.macros.contains_key(line) != inverted
+    {
         context.inactive_stack = 0;
     }
-    Ok(())
+    Ok(String::from(""))
 }
 
-fn process_else(line: &str, context: &mut Context) -> Result<(), Error> {
+fn process_else(line: &str, context: &mut Context) -> Result<String, Error> {
     if !line.is_empty() {
         return Err(Error::TooManyParameters { command: "else" });
     }
     context.inactive_stack = match context.inactive_stack {
         0 => 1,
-        1 => 0,
+        1 if !context.used_if => 0,
         val => val,
     };
-    Ok(())
+    Ok(String::from(""))
 }
 
-fn process_endif(line: &str, context: &mut Context) -> Result<(), Error> {
+fn process_endif(line: &str, context: &mut Context) -> Result<String, Error> {
     if !line.is_empty() {
         return Err(Error::TooManyParameters { command: "endif" });
     }
     if context.inactive_stack > 0 {
         context.inactive_stack -= 1;
     }
-    Ok(())
+    Ok(String::from(""))
 }
 
 fn is_word_char(c: char) -> bool {
@@ -226,12 +253,11 @@ fn replace_next_macro(line: &str, macros: &HashMap<String, String>) -> Option<St
 ///
 /// This is the smallest processing function, and all other processing functions are wrappers
 /// around it. It only processes singular lines, and will not work on any string that contains
-/// newlines.
+/// newlines unless that newline is at the end.
 ///
-/// It returns a Result<Option<String>, Error>. If an error occurs, then the Result will be that
-/// error. Otherwise, if the Option is None then it means that the line parsed was a command or the
-/// result of a failed if, and a blank line should not be placed in the output; if the option is
-/// Some(String), then place that String followed by a newline in the output.
+/// It returns a Result<String, Error>. If an error occurs, then the Result will be that error.
+/// Otherwise, the returned string is the output. If the input did not contain a newline at the
+/// end, then this function will add it.
 ///
 /// # Examples
 ///
@@ -239,47 +265,48 @@ fn replace_next_macro(line: &str, macros: &HashMap<String, String>) -> Option<St
 /// let mut context = gpp::Context::new();
 /// context.macros.insert("Foo".to_string(), "Two".to_string());
 ///
-/// assert_eq!(gpp::process_line("One Foo Three", &mut context).unwrap().unwrap(), "One Two Three");
+/// assert_eq!(gpp::process_line("One Foo Three", &mut context).unwrap(), "One Two Three\n");
 /// ```
 /// ```
 /// let mut context = gpp::Context::new();
 ///
-/// assert!(gpp::process_line("#define Foo Bar", &mut context).unwrap().is_none());
+/// assert_eq!(gpp::process_line("#define Foo Bar", &mut context).unwrap(), "");
 /// assert_eq!(context.macros.get("Foo").unwrap(), "Bar");
 /// ```
-pub fn process_line(line: &str, context: &mut Context) -> Result<Option<String>, Error> {
-    if let Some('#') = line.trim_start().chars().next() {
+pub fn process_line(line: &str, context: &mut Context) -> Result<String, Error> {
+    if line.trim_start().chars().next() == Some('#') {
         let after_hash = line.trim_start()[1..].trim_start();
         let (statement, content) = match after_hash.find(' ') {
             Some(index) => after_hash.split_at(index),
             None => (after_hash, ""),
         };
         let content = content.trim_start();
-        match statement {
-            "define" if context.inactive_stack == 0 => process_define(content, context)?,
-            "undef" if context.inactive_stack == 0 => process_undef(content, context)?,
-            "ifdef" => process_ifdef(content, context, false)?,
-            "ifndef" => process_ifdef(content, context, true)?,
-            "elifdef" => process_elifdef(content, context, false)?,
-            "elifndef" => process_elifdef(content, context, true)?,
-            "else" => process_else(content, context)?,
-            "endif" => process_endif(content, context)?,
-            command => {
-                return Err(Error::InvalidCommand {
-                    command_name: command.to_owned(),
-                })
-            }
-        }
-        return Ok(None);
+        return match statement {
+            "include" if context.inactive_stack == 0 => process_include(content, context),
+            "define" if context.inactive_stack == 0 => process_define(content, context),
+            "undef" if context.inactive_stack == 0 => process_undef(content, context),
+            "ifdef" => process_ifdef(content, context, false),
+            "ifndef" => process_ifdef(content, context, true),
+            "elifdef" => process_elifdef(content, context, false),
+            "elifndef" => process_elifdef(content, context, true),
+            "else" => process_else(content, context),
+            "endif" => process_endif(content, context),
+            command => Err(Error::InvalidCommand {
+                command_name: command.to_owned(),
+            }),
+        };
     }
     if context.inactive_stack > 0 {
-        return Ok(None);
+        return Ok(String::from(""));
     }
     let mut line = String::from(line);
     while let Some(s) = replace_next_macro(&line, &context.macros) {
         line = s;
     }
-    Ok(Some(line))
+    if line.chars().rev().next() != Some('\n') {
+        line.push('\n');
+    }
+    Ok(line)
 }
 
 /// Error struct for errors and a line number.
@@ -326,12 +353,11 @@ pub fn process_str(s: &str, context: &mut Context) -> Result<String, LineError> 
     let mut result = String::new();
 
     for (num, line) in s.lines().enumerate() {
+        println!("num {} line {}", num, line);
         match process_line(line, context) {
-            Ok(Some(result_line)) => {
+            Ok(result_line) => {
                 result.push_str(&result_line);
-                result.push('\n');
             }
-            Ok(None) => {}
             Err(e) => {
                 return Err(LineError {
                     line: num,
@@ -341,67 +367,47 @@ pub fn process_str(s: &str, context: &mut Context) -> Result<String, LineError> 
         };
     }
 
-    return Ok(result);
+    Ok(result)
 }
 
-/// Error enum for errors caused by BufRead.
-///
-/// This error enum is a wrapper around either a LineError, or an IoError. It is generated by
-/// process_buf, which deals with io::Error-prone BufReads, not strings.
-///
-/// It also implements fmt::Display, and so can be easily formatted and printed.
-///
-/// # Examples
-/// ```
-/// use std::io;
-///
-/// let error = gpp::BufError::IoError(io::Error::new(io::ErrorKind::Other, "Failed to read"));
-/// assert_eq!(format!("{}", error), "I/O error: Failed to read");
-/// ```
-#[derive(Debug)]
-pub enum BufError {
-    LineError(LineError),
-    IoError(io::Error),
-}
-
-impl fmt::Display for BufError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BufError::LineError(e) => write!(f, "{}", e),
-            BufError::IoError(e) => write!(f, "I/O error: {}", e),
-        }
-    }
-}
-
-/// Process a generic BufRead.
+/// Process a generic BufRead and write to a generic Write.
 ///
 /// This function is exactly like `process_str`, but works for any type that implements std::io::BufRead.
-///
-/// Unlike `process_str`, its errors are more complicated. It returns a Result<String, BufError>.
-/// BufError is a wrapper enum error type that can contain LineError(LineError) or
-/// IoError(io::Error).
-pub fn process_buf<T: BufRead>(buf: T, context: &mut Context) -> Result<String, BufError> {
-    let mut result = String::new();
-
+pub fn process_buf<T: BufRead, R: Write>(
+    buf: T,
+    result: &mut R,
+    context: &mut Context,
+) -> Result<(), LineError> {
     for (num, line) in buf.lines().enumerate() {
         let line = match line {
             Ok(line) => line,
-            Err(e) => return Err(BufError::IoError(e)),
+            Err(e) => {
+                return Err(LineError {
+                    line: num,
+                    error: Error::IoError(e),
+                })
+            }
         };
         match process_line(&line, context) {
-            Ok(Some(result_line)) => {
-                result.push_str(&result_line);
-                result.push('\n');
+            Ok(result_line) => {
+                while let Err(e) = result.write(result_line.as_bytes()) {
+                    if e.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(LineError {
+                        line: num,
+                        error: Error::IoError(e),
+                    });
+                }
             }
-            Ok(None) => {}
             Err(e) => {
-                return Err(BufError::LineError(LineError {
+                return Err(LineError {
                     line: num,
                     error: e,
-                }))
+                })
             }
         };
     }
 
-    return Ok(result);
+    Ok(())
 }

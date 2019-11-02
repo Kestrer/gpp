@@ -1,0 +1,7 @@
+#ifdef A
+a macro is A
+#elifdef B
+b macro is B
+#else
+no macro
+#endif
