@@ -353,7 +353,6 @@ pub fn process_str(s: &str, context: &mut Context) -> Result<String, LineError> 
     let mut result = String::new();
 
     for (num, line) in s.lines().enumerate() {
-        println!("num {} line {}", num, line);
         match process_line(line, context) {
             Ok(result_line) => {
                 result.push_str(&result_line);
@@ -368,6 +367,20 @@ pub fn process_str(s: &str, context: &mut Context) -> Result<String, LineError> 
     }
 
     Ok(result)
+}
+
+/// Process a file.
+///
+/// This function is a convenience function for `read_to_string` and `process_str`.
+pub fn process_file(filename: &str, context: &mut Context) -> Result<String, LineError> {
+    let s = match fs::read_to_string(filename) {
+        Ok(s) => s,
+        Err(e) => return Err(LineError {
+            line: 0,
+            error: Error::IoError(e),
+        }),
+    };
+    process_str(&s, context)
 }
 
 /// Process a generic BufRead and write to a generic Write.
