@@ -133,28 +133,10 @@ impl fmt::Display for Error {
 }
 
 fn process_include(line: &str, context: &mut Context) -> Result<String, Error> {
-    let file = match fs::read_to_string(line) {
-        Ok(s) => s,
-        Err(e) => return Err(Error::IoError(e)),
-    };
-    let old_dir = match env::current_dir() {
-        Ok(s) => s,
-        Err(e) => return Err(Error::IoError(e)),
-    };
-    let parent_dir = Path::new(line).parent().unwrap();
-    if parent_dir != Path::new("") {
-        if let Err(e) = env::set_current_dir(parent_dir) {
-            return Err(Error::IoError(e));
-        }
-    }
-    let result = match process_str(&file, context) {
+    match process_file(line, context) {
         Ok(s) => Ok(s),
         Err(e) => Err(e.error),
-    };
-    if let Err(e) = env::set_current_dir(old_dir) {
-        return Err(Error::IoError(e));
     }
-    result
 }
 
 fn process_define(line: &str, context: &mut Context) -> Result<String, Error> {
@@ -352,6 +334,15 @@ impl fmt::Display for LineError {
     }
 }
 
+impl LineError {
+    fn from_io(e: io::Error) -> LineError {
+        LineError {
+            line: 0,
+            error: Error::IoError(e),
+        }
+    }
+}
+
 /// Process a multi-line string of text.
 ///
 /// This function is a wrapper around `process_line`. It splits up the text into lines, adding a
@@ -389,14 +380,25 @@ pub fn process_str(s: &str, context: &mut Context) -> Result<String, LineError> 
 ///
 /// This function is a convenience function for `read_to_string` and `process_str`.
 pub fn process_file(filename: &str, context: &mut Context) -> Result<String, LineError> {
-    let s = match fs::read_to_string(filename) {
+    let file = match fs::read_to_string(filename) {
         Ok(s) => s,
-        Err(e) => return Err(LineError {
-            line: 0,
-            error: Error::IoError(e),
-        }),
+        Err(e) => return Err(LineError::from_io(e)),
     };
-    process_str(&s, context)
+    let old_dir = match env::current_dir() {
+        Ok(s) => s,
+        Err(e) => return Err(LineError::from_io(e)),
+    };
+    let parent_dir = Path::new(filename).parent().unwrap();
+    if parent_dir != Path::new("") {
+        if let Err(e) = env::set_current_dir(parent_dir) {
+            return Err(LineError::from_io(e));
+        }
+    }
+    let result = process_str(&file, context);
+    if let Err(e) = env::set_current_dir(old_dir) {
+        return Err(LineError::from_io(e));
+    }
+    result
 }
 
 /// Process a generic BufRead and write to a generic Write.
