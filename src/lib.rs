@@ -97,7 +97,7 @@ impl Context {
         }
     }
     /// Create a context from an existing HashMap
-    pub fn from_map(macros: HashMap<String, String>) {
+    pub fn from_map(macros: HashMap<String, String>) -> Context {
         Context {
             macros,
             inactive_stack: 0,
