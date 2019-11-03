@@ -61,6 +61,8 @@ mod tests;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+use std::env;
+use std::path::Path;
 use std::io::{self, BufRead, Write};
 
 /// Context of the current processing.
@@ -135,10 +137,24 @@ fn process_include(line: &str, context: &mut Context) -> Result<String, Error> {
         Ok(s) => s,
         Err(e) => return Err(Error::IoError(e)),
     };
-    match process_str(&file, context) {
+    let old_dir = match env::current_dir() {
+        Ok(s) => s,
+        Err(e) => return Err(Error::IoError(e)),
+    };
+    let parent_dir = Path::new(line).parent().unwrap();
+    if parent_dir != Path::new("") {
+        if let Err(e) = env::set_current_dir(parent_dir) {
+            return Err(Error::IoError(e));
+        }
+    }
+    let result = match process_str(&file, context) {
         Ok(s) => Ok(s),
         Err(e) => Err(e.error),
+    };
+    if let Err(e) = env::set_current_dir(old_dir) {
+        return Err(Error::IoError(e));
     }
+    result
 }
 
 fn process_define(line: &str, context: &mut Context) -> Result<String, Error> {
