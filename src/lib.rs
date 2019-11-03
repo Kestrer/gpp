@@ -59,11 +59,11 @@
 mod tests;
 
 use std::collections::HashMap;
+use std::env;
 use std::fmt;
 use std::fs;
-use std::env;
-use std::path::Path;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 
 /// Context of the current processing.
 ///

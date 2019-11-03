@@ -134,11 +134,7 @@ fn include() {
 #[test]
 fn include_dir() {
     assert_eq!(
-        crate::process_str(
-            "#include tests/include.txt",
-            &mut crate::Context::new()
-        )
-        .unwrap(),
+        crate::process_str("#include tests/include.txt", &mut crate::Context::new()).unwrap(),
         "some text\n"
     );
 }
