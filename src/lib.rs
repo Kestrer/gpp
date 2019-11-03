@@ -96,6 +96,22 @@ impl Context {
             used_if: false,
         }
     }
+    /// Create a context from an existing HashMap
+    pub fn from_map(macros: HashMap<String, String>) {
+        Context {
+            macros,
+            inactive_stack: 0,
+            used_if: false,
+        }
+    }
+    /// Create a context from a vector of tuples
+    pub fn from_vec(macros: Vec<(&str, &str)>) -> Context {
+        Context {
+            macros: macros.into_iter().map(|(name, value)| (name.to_owned(), value.to_owned())).collect(),
+            inactive_stack: 0,
+            used_if: false,
+        }
+    }
 }
 
 /// Error enum for parsing errors.
