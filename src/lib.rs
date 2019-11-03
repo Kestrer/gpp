@@ -60,6 +60,7 @@ mod tests;
 
 use std::collections::HashMap;
 use std::env;
+use std::error;
 use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -131,6 +132,8 @@ impl fmt::Display for Error {
         }
     }
 }
+
+impl error::Error for Error {}
 
 fn process_include(line: &str, context: &mut Context) -> Result<String, Error> {
     match process_file(line, context) {
@@ -333,6 +336,8 @@ impl fmt::Display for LineError {
         write!(f, "Error on line {}: {}", self.line, self.error)
     }
 }
+
+impl error::Error for LineError {}
 
 impl LineError {
     fn from_io(e: io::Error) -> LineError {
