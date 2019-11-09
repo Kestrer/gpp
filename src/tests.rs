@@ -26,11 +26,11 @@ fn define() {
     );
     assert_eq!(
         crate::process_str(
-            " # define Baz\nBaz\n#undef Quux\n # undef Baz\nBaz\n",
+            "# define Baz\nBaz\n#undef Quux\n# undef Baz\nBaz\n",
             &mut crate::Context::new()
         )
         .unwrap(),
-        "1\nBaz\n"
+        "\nBaz\n"
     );
 }
 
@@ -69,8 +69,8 @@ Bar
 fn elif() {
     assert_eq!(
         crate::process_str(
-            "#define Foo
-#define Bar
+            "#define Foo foo
+#define Bar bar
 #ifdef Foo
 Just Foo
 # ifdef Baz
@@ -82,7 +82,7 @@ Foo and Bar
             &mut crate::Context::new()
         )
         .unwrap(),
-        "Just 1\n1 and 1\n"
+        "Just foo\nfoo and bar\n"
     );
 }
 
@@ -136,5 +136,61 @@ fn include_dir() {
     assert_eq!(
         crate::process_str("#include tests/include.txt", &mut crate::Context::new()).unwrap(),
         "some text\n"
+    );
+}
+
+#[test]
+fn exec() {
+    assert_eq!(
+        crate::process_str(
+            "#exec echo 'Hello there!' | sed 's/there/world/'",
+            &mut crate::Context::new_exec()
+        )
+        .unwrap(),
+        "Hello world!\n"
+    );
+}
+
+#[test]
+fn input() {
+    assert_eq!(
+        crate::process_str(
+            "#in sed 's/cat/dog/g'\nI love cats!\n#endin",
+            &mut crate::Context::new_exec()
+        )
+        .unwrap(),
+        "I love dogs!\n"
+    );
+}
+
+#[test]
+fn nested_input() {
+    assert_eq!(
+        crate::process_str(
+            "
+#in sed 's/cat/dog/g'
+I love cats!
+# in head -c4
+cats are great.
+# endin
+#endin",
+            &mut crate::Context::new_exec()
+        )
+        .unwrap(),
+        "
+I love dogs!
+dogs"
+    );
+}
+
+#[test]
+fn literal_hash() {
+    assert_eq!(
+        crate::process_str(" ## literal hash", &mut crate::Context::new()).unwrap(),
+        " ## literal hash\n"
+    );
+    assert_eq!(
+        crate::process_str("## literal hash", &mut crate::Context::new()).unwrap(),
+        "# literal hash\n"
     );
 }

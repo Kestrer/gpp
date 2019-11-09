@@ -3,21 +3,74 @@
 //! It supports:
 //! - Simple macros, no function macros
 //! - #include
-//! - #define
-//! - #undef
-//! - #ifdef
-//! - #ifndef
-//! - #elifdef
-//! - #elifndef
-//! - #else
-//! - #endif
+//! - #define and #undef
+//! - #ifdef, #ifndef, #elifdef, #elifndef, #else and #endif
+//! - #exec for running commands
+//! - #in and #endin for giving input to commands
 //!
 //! #includes work differently from C, as they do not require (and do not work with) quotes or <>,
 //! so `#include file.txt` is the correct syntax. It does not support #if or #elif, and recursive
 //! macros will cause the library to get stuck.
 //!
-//! This library is heavily inspired by [minipre](https://docs.rs/minipre/0.2.0/minipre/), however
-//! this library supports more commands like #define, #undef and #include.
+//! # About
+//!
+//! The hash in any command may be succeeded by optional whitespace, so for example `# undef Macro`
+//! is valid, but ` # undef Macro` is not.
+//!
+//! ## #define and #undef
+//!
+//! #define works similar to C: `#define [name] [value]`, and #undef too: `#undef [name]`. Be
+//! careful though, because unlike C macro expansion is recursive: if you `#define A A` and then
+//! use A, then gpp will run forever.
+//! If #define is not given a value, then it will default to an empty string.
+//!
+//! ## #include
+//!
+//! Includes, unlike C, do not require quotes or angle brackets, so this: `#include "file.txt"` or
+//! this: `#include <file.txt>` will not work; you must write `#include file.txt`.
+//!
+//! ## Ifs
+//!
+//! The #ifdef, #ifndef, #elifdef, #elifndef, #else and #endif commands work exactly as you expect.
+//! I did not add generic #if commands to gpp, as it would make it much more complex and require a
+//! lot of parsing, and most of the time these are all you need anyway.
+//!
+//! ## #exec, #in and #endin
+//!
+//! The exec command executes the given command with `cmd /C` for Windows and `sh -c` for
+//! everything else, and captures the command's standard output. For example, `#exec echo Hi!` will
+//! output `Hi!`. It does not capture the command's standard error, and parsing stops if the
+//! command exits with a nonzero status.
+//!
+//! Due to the security risk enabling #exec causes, by default exec is disabled, however you can
+//! enable it by changing the `allow_exec` flag in your context. If the input tries to `#exec` when
+//! exec is disabled, it will cause an error.
+//!
+//! The in command is similar to exec, but all text until the endin command is passed into the
+//! program's standard input. For example,
+//! ```text
+//! #in sed 's/tree/three/g'
+//! One, two, tree.
+//! #endin
+//! ```
+//! Would output `One, two, three.`. Note that you shouldn't do this, just using `#define tree
+//! three` would be much faster and less platform-dependant. You can also place more commands in
+//! the in block, including other in blocks. For a useful example:
+//! ```text
+//! <style>
+//! #in sassc -s
+//! # include styles.scss
+//! #endin
+//! </style>
+//! ```
+//! This compiles your scss file into css using Sassc and includes in the HTML every time you
+//! generate your webpage with gpp.
+//!
+//! ## Literal hashes
+//!
+//! In order to insert literal hash symbols at the start of the line, simply use two hashes.
+//! `##some text` will convert into `#some text`, while `#some text` will throw an error as `some`
+//! is not a command.
 //!
 //! # Examples
 //!
@@ -33,26 +86,28 @@
 //!
 //! // Process some multi-line text, changing the context
 //! assert_eq!(gpp::process_str("
-//!     #define Line Row
-//!     Line One
-//!     Line Two
-//!     The Third Line", &mut context).unwrap(), "
-//!     Row One
-//!     Row Two
-//!     The Third Row\n");
+//! #define Line Row
+//! Line One
+//! Line Two
+//! The Third Line", &mut context).unwrap(), "
+//! Row One
+//! Row Two
+//! The Third Row
+//! ");
 //!
 //! // The context persists
 //! assert_eq!(context.macros.get("Line").unwrap(), "Row");
 //!
-//! // Try some more advanced statements
+//! // Try some more advanced commands
 //! assert_eq!(gpp::process_str("
-//!     Line Four
-//!     #ifdef Line
-//!     #undef Line
-//!     #endif
-//!     Line Five", &mut context).unwrap(), "
-//!     Row Four
-//!     Line Five\n");
+//! Line Four
+//! #ifdef Line
+//! #undef Line
+//! #endif
+//! Line Five", &mut context).unwrap(), "
+//! Row Four
+//! Line Five
+//! ");
 //! ```
 
 #[cfg(test)]
@@ -65,6 +120,8 @@ use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::string::FromUtf8Error;
 
 /// Context of the current processing.
 ///
@@ -85,15 +142,31 @@ pub struct Context {
     pub inactive_stack: u32,
     /// Whether the current if statement has been accepted.
     pub used_if: bool,
+    /// Whether #exec and #in commands are allowed.
+    pub allow_exec: bool,
+    /// The stack of processes that #in is piping to.
+    pub in_stack: Vec<Child>,
 }
 
 impl Context {
-    /// Create a new empty context with no macros or inactive stack.
+    /// Create a new empty context with no macros or inactive stack and exec commands disallowed.
     pub fn new() -> Context {
         Context {
             macros: HashMap::new(),
             inactive_stack: 0,
             used_if: false,
+            allow_exec: false,
+            in_stack: Vec::new(),
+        }
+    }
+    /// Create a new empty context with no macros or inactive stack and exec commands allowed.
+    pub fn new_exec() -> Context {
+        Context {
+            macros: HashMap::new(),
+            inactive_stack: 0,
+            used_if: false,
+            allow_exec: true,
+            in_stack: Vec::new(),
         }
     }
     /// Create a context from an existing HashMap
@@ -102,14 +175,21 @@ impl Context {
             macros,
             inactive_stack: 0,
             used_if: false,
+            allow_exec: false,
+            in_stack: Vec::new(),
         }
     }
     /// Create a context from a vector of tuples
     pub fn from_vec(macros: Vec<(&str, &str)>) -> Context {
         Context {
-            macros: macros.into_iter().map(|(name, value)| (name.to_owned(), value.to_owned())).collect(),
+            macros: macros
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
             inactive_stack: 0,
             used_if: false,
+            allow_exec: false,
+            in_stack: Vec::new(),
         }
     }
 }
@@ -122,14 +202,24 @@ impl Context {
 ///
 /// ```
 /// let error = gpp::Error::TooManyParameters { command: "my_command" };
-/// assert_eq!(format!("{}", error), "Too many parameters for my_command");
+/// assert_eq!(format!("{}", error), "Too many parameters for #my_command");
 /// ```
 #[derive(Debug)]
 pub enum Error {
+    /// An unknown command was encountered.
     InvalidCommand { command_name: String },
-    InvalidMacroName { macro_name: String },
+    /// Too many parameters were given for a command (for example using #endif with parameters).
     TooManyParameters { command: &'static str },
+    /// There was an unexpected command; currently only generated for unexpected #endins.
+    UnexpectedCommand { command: &'static str },
+    /// The child process for an #exec exited with a nonzero status.
+    ChildFailed { status: ExitStatus },
+    /// A pipe was unable to be set up to the child.
+    PipeFailed,
+    /// An error with I/O occurred.
     IoError(io::Error),
+    /// An error occurred parsing a child's standard output as UTF-8.
+    FromUtf8Error(FromUtf8Error),
 }
 
 impl fmt::Display for Error {
@@ -138,18 +228,72 @@ impl fmt::Display for Error {
             Error::InvalidCommand { command_name } => {
                 write!(f, "Invalid command '{}'", command_name)
             }
-            Error::InvalidMacroName { macro_name } => {
-                write!(f, "Invalid macro name '{}'", macro_name)
-            }
             Error::TooManyParameters { command } => {
-                write!(f, "Too many parameters for {}", command)
+                write!(f, "Too many parameters for #{}", command)
             }
+            Error::UnexpectedCommand { command } => write!(f, "Unexpected command #{}", command),
+            Error::ChildFailed { status } => write!(f, "Child failed with exit code {}", status),
+            Error::PipeFailed => write!(f, "Pipe to child failed"),
             Error::IoError(e) => write!(f, "I/O Error: {}", e),
+            Error::FromUtf8Error(e) => write!(f, "UTF-8 Error: {}", e),
         }
     }
 }
 
 impl error::Error for Error {}
+
+fn shell(cmd: &str) -> Command {
+    let mut command;
+    if cfg!(target_os = "windows") {
+        command = Command::new("cmd");
+        command.args(&["/C", cmd]);
+    } else {
+        command = Command::new("sh");
+        command.args(&["-c", cmd]);
+    }
+    command
+}
+
+fn process_exec(line: &str, _context: &mut Context) -> Result<String, Error> {
+    let output = shell(line)
+        .output()
+        .map_err(|io_error| Error::IoError(io_error))?;
+    if !output.status.success() {
+        return Err(Error::ChildFailed {
+            status: output.status,
+        });
+    }
+    String::from_utf8(output.stdout).map_err(|utf8_error| Error::FromUtf8Error(utf8_error))
+}
+
+fn process_in(line: &str, context: &mut Context) -> Result<String, Error> {
+    let child = shell(line)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|io_error| Error::IoError(io_error))?;
+    context.in_stack.push(child);
+    Ok(String::new())
+}
+
+fn process_endin(line: &str, context: &mut Context) -> Result<String, Error> {
+    if !line.is_empty() {
+        return Err(Error::TooManyParameters { command: "endin" });
+    }
+    if context.in_stack.is_empty() {
+        return Err(Error::UnexpectedCommand { command: "endin" });
+    }
+    let child = context.in_stack.pop().unwrap();
+    let output = child
+        .wait_with_output()
+        .map_err(|io_error| Error::IoError(io_error))?;
+    if !output.status.success() {
+        return Err(Error::ChildFailed {
+            status: output.status,
+        });
+    }
+    String::from_utf8(output.stdout).map_err(|utf8_error| Error::FromUtf8Error(utf8_error))
+}
 
 fn process_include(line: &str, context: &mut Context) -> Result<String, Error> {
     match process_file(line, context) {
@@ -161,19 +305,19 @@ fn process_include(line: &str, context: &mut Context) -> Result<String, Error> {
 fn process_define(line: &str, context: &mut Context) -> Result<String, Error> {
     let (name, value) = match line.find(' ') {
         Some(index) => line.split_at(index),
-        None => (line, " 1"),
+        None => (line, " "),
     };
     // remove leading space
     let value = &value[1..];
     context
         .macros
         .insert(String::from(name), String::from(value));
-    Ok(String::from(""))
+    Ok(String::new())
 }
 
 fn process_undef(line: &str, context: &mut Context) -> Result<String, Error> {
     context.macros.remove(line);
-    Ok(String::from(""))
+    Ok(String::new())
 }
 
 fn process_ifdef(line: &str, context: &mut Context, inverted: bool) -> Result<String, Error> {
@@ -185,7 +329,7 @@ fn process_ifdef(line: &str, context: &mut Context, inverted: bool) -> Result<St
     } else {
         context.used_if = true;
     }
-    Ok(String::from(""))
+    Ok(String::new())
 }
 
 fn process_elifdef(line: &str, context: &mut Context, inverted: bool) -> Result<String, Error> {
@@ -197,7 +341,7 @@ fn process_elifdef(line: &str, context: &mut Context, inverted: bool) -> Result<
     {
         context.inactive_stack = 0;
     }
-    Ok(String::from(""))
+    Ok(String::new())
 }
 
 fn process_else(line: &str, context: &mut Context) -> Result<String, Error> {
@@ -209,17 +353,17 @@ fn process_else(line: &str, context: &mut Context) -> Result<String, Error> {
         1 if !context.used_if => 0,
         val => val,
     };
-    Ok(String::from(""))
+    Ok(String::new())
 }
 
 fn process_endif(line: &str, context: &mut Context) -> Result<String, Error> {
     if !line.is_empty() {
         return Err(Error::TooManyParameters { command: "endif" });
     }
-    if context.inactive_stack > 0 {
+    if context.inactive_stack != 0 {
         context.inactive_stack -= 1;
     }
-    Ok(String::from(""))
+    Ok(String::new())
 }
 
 fn is_word_char(c: char) -> bool {
@@ -291,14 +435,26 @@ fn replace_next_macro(line: &str, macros: &HashMap<String, String>) -> Option<St
 /// assert_eq!(context.macros.get("Foo").unwrap(), "Bar");
 /// ```
 pub fn process_line(line: &str, context: &mut Context) -> Result<String, Error> {
-    if line.trim_start().chars().next() == Some('#') {
-        let after_hash = line.trim_start()[1..].trim_start();
-        let (statement, content) = match after_hash.find(' ') {
+    let mut chars = line.chars();
+    let first = chars.next();
+    let second = chars.next();
+    let line = if first == Some('#') && second != Some('#') {
+        let after_hash = line[1..].trim_start();
+        let (command, content) = match after_hash.find(' ') {
             Some(index) => after_hash.split_at(index),
             None => (after_hash, ""),
         };
         let content = content.trim_start();
-        return match statement {
+        match command {
+            "exec" if context.inactive_stack == 0 && context.allow_exec => {
+                process_exec(content, context)
+            }
+            "in" if context.inactive_stack == 0 && context.allow_exec => {
+                process_in(content, context)
+            }
+            "endin" if context.inactive_stack == 0 && context.allow_exec => {
+                process_endin(content, context)
+            }
             "include" if context.inactive_stack == 0 => process_include(content, context),
             "define" if context.inactive_stack == 0 => process_define(content, context),
             "undef" if context.inactive_stack == 0 => process_undef(content, context),
@@ -311,19 +467,33 @@ pub fn process_line(line: &str, context: &mut Context) -> Result<String, Error> 
             command => Err(Error::InvalidCommand {
                 command_name: command.to_owned(),
             }),
-        };
+        }?
+    } else {
+        if context.inactive_stack > 0 {
+            return Ok(String::new());
+        }
+        let mut line = String::from(if first == Some('#') && second == Some('#') {
+            &line[1..]
+        } else {
+            line
+        });
+        while let Some(s) = replace_next_macro(&line, &context.macros) {
+            line = s;
+        }
+        if line.chars().rev().next() != Some('\n') {
+            line.push('\n');
+        }
+        line
+    };
+    if let Some(child) = context.in_stack.last_mut() {
+        let input = child.stdin.as_mut().ok_or_else(|| Error::PipeFailed)?;
+        input
+            .write_all(line.as_bytes())
+            .map_err(|err| Error::IoError(err))?;
+        Ok(String::new())
+    } else {
+        Ok(line)
     }
-    if context.inactive_stack > 0 {
-        return Ok(String::from(""));
-    }
-    let mut line = String::from(line);
-    while let Some(s) = replace_next_macro(&line, &context.macros) {
-        line = s;
-    }
-    if line.chars().rev().next() != Some('\n') {
-        line.push('\n');
-    }
-    Ok(line)
 }
 
 /// Error struct for errors and a line number.
@@ -375,7 +545,7 @@ impl LineError {
 /// # Examples
 ///
 /// ```
-/// assert_eq!(gpp::process_str("#define A\n A 2 3 \n", &mut gpp::Context::new()).unwrap(), " 1 2 3 \n");
+/// assert_eq!(gpp::process_str("#define A 1\n A 2 3 \n", &mut gpp::Context::new()).unwrap(), " 1 2 3 \n");
 /// ```
 pub fn process_str(s: &str, context: &mut Context) -> Result<String, LineError> {
     let mut result = String::new();
