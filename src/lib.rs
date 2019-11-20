@@ -117,8 +117,8 @@ use std::collections::HashMap;
 use std::env;
 use std::error;
 use std::fmt;
-use std::fs;
-use std::io::{self, BufRead, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::string::FromUtf8Error;
@@ -135,6 +135,7 @@ use std::string::FromUtf8Error;
 /// can set variable names not possible with #defines. However, when replacing variable names in
 /// text the variable name must be surrounded by two characters that are **not** alphanumeric or an
 /// underscore.
+#[derive(Default)]
 pub struct Context {
     /// Map of all currently defined macros.
     pub macros: HashMap<String, String>,
@@ -204,6 +205,16 @@ impl Context {
 /// let error = gpp::Error::TooManyParameters { command: "my_command" };
 /// assert_eq!(format!("{}", error), "Too many parameters for #my_command");
 /// ```
+/// ```
+/// let error = gpp::Error::FileError {
+///     filename: String::from("my_file"),
+///     line: 10,
+///     error: Box::new(gpp::Error::UnexpectedCommand {
+///         command: "this_command",
+///     }),
+/// };
+/// assert_eq!(format!("{}", error), "Error in my_file:10: Unexpected command #this_command");
+/// ```
 #[derive(Debug)]
 pub enum Error {
     /// An unknown command was encountered.
@@ -220,6 +231,12 @@ pub enum Error {
     IoError(io::Error),
     /// An error occurred parsing a child's standard output as UTF-8.
     FromUtf8Error(FromUtf8Error),
+    /// An error occurred in another file.
+    FileError {
+        filename: String,
+        line: usize,
+        error: Box<Error>,
+    },
 }
 
 impl fmt::Display for Error {
@@ -236,11 +253,37 @@ impl fmt::Display for Error {
             Error::PipeFailed => write!(f, "Pipe to child failed"),
             Error::IoError(e) => write!(f, "I/O Error: {}", e),
             Error::FromUtf8Error(e) => write!(f, "UTF-8 Error: {}", e),
+            Error::FileError {
+                filename,
+                line,
+                error,
+            } => write!(f, "Error in {}:{}: {}", filename, line, error),
         }
     }
 }
 
-impl error::Error for Error {}
+impl error::Error for Error {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Error::IoError(e) => Some(e),
+            Error::FromUtf8Error(e) => Some(e),
+            Error::FileError { error: e, .. } => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
+        Error::IoError(e)
+    }
+}
+
+impl From<FromUtf8Error> for Error {
+    fn from(e: FromUtf8Error) -> Self {
+        Error::FromUtf8Error(e)
+    }
+}
 
 fn shell(cmd: &str) -> Command {
     let mut command;
@@ -254,24 +297,21 @@ fn shell(cmd: &str) -> Command {
     command
 }
 
-fn process_exec(line: &str, _context: &mut Context) -> Result<String, Error> {
-    let output = shell(line)
-        .output()
-        .map_err(|io_error| Error::IoError(io_error))?;
+fn process_exec(line: &str, _: &mut Context) -> Result<String, Error> {
+    let output = shell(line).output()?;
     if !output.status.success() {
         return Err(Error::ChildFailed {
             status: output.status,
         });
     }
-    String::from_utf8(output.stdout).map_err(|utf8_error| Error::FromUtf8Error(utf8_error))
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 fn process_in(line: &str, context: &mut Context) -> Result<String, Error> {
     let child = shell(line)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|io_error| Error::IoError(io_error))?;
+        .spawn()?;
     context.in_stack.push(child);
     Ok(String::new())
 }
@@ -284,22 +324,17 @@ fn process_endin(line: &str, context: &mut Context) -> Result<String, Error> {
         return Err(Error::UnexpectedCommand { command: "endin" });
     }
     let child = context.in_stack.pop().unwrap();
-    let output = child
-        .wait_with_output()
-        .map_err(|io_error| Error::IoError(io_error))?;
+    let output = child.wait_with_output()?;
     if !output.status.success() {
         return Err(Error::ChildFailed {
             status: output.status,
         });
     }
-    String::from_utf8(output.stdout).map_err(|utf8_error| Error::FromUtf8Error(utf8_error))
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 fn process_include(line: &str, context: &mut Context) -> Result<String, Error> {
-    match process_file(line, context) {
-        Ok(s) => Ok(s),
-        Err(e) => Err(e.error),
-    }
+    process_file(line, context)
 }
 
 fn process_define(line: &str, context: &mut Context) -> Result<String, Error> {
@@ -486,150 +521,67 @@ pub fn process_line(line: &str, context: &mut Context) -> Result<String, Error> 
         line
     };
     if let Some(child) = context.in_stack.last_mut() {
-        let input = child.stdin.as_mut().ok_or_else(|| Error::PipeFailed)?;
-        input
-            .write_all(line.as_bytes())
-            .map_err(|err| Error::IoError(err))?;
+        let input = child.stdin.as_mut().ok_or(Error::PipeFailed)?;
+        input.write_all(line.as_bytes())?;
         Ok(String::new())
     } else {
         Ok(line)
     }
 }
 
-/// Error struct for errors and a line number.
-///
-/// These errors are wrappers around the regular Error type, but also contain a usize that shows on
-/// which line the error occurred.
-///
-/// It implements std::fmt::Display, and so can be easily printed with println!.
-///
-/// # Examples
-///
-/// ```
-/// let error = gpp::LineError { line: 40, error: gpp::Error::InvalidCommand { command_name: String::from("my_invalid_command") } };
-/// assert_eq!(format!("{}", error), "Error on line 40: Invalid command 'my_invalid_command'");
-/// ```
-#[derive(Debug)]
-pub struct LineError {
-    /// The line on which the error occurred.
-    pub line: usize,
-    /// The error itself.
-    pub error: Error,
-}
-
-impl fmt::Display for LineError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Error on line {}: {}", self.line, self.error)
-    }
-}
-
-impl error::Error for LineError {}
-
-impl LineError {
-    fn from_io(e: io::Error) -> LineError {
-        LineError {
-            line: 0,
-            error: Error::IoError(e),
-        }
-    }
-}
-
 /// Process a multi-line string of text.
 ///
-/// This function is a wrapper around `process_line`. It splits up the text into lines, adding a
-/// newline on the end if there isn't one, and processes it.
-///
-/// It returns either a String representing the final processed text or a LineError if something
-/// went wrong.
+/// See `process_buf` for more details.
 ///
 /// # Examples
 ///
 /// ```
 /// assert_eq!(gpp::process_str("#define A 1\n A 2 3 \n", &mut gpp::Context::new()).unwrap(), " 1 2 3 \n");
 /// ```
-pub fn process_str(s: &str, context: &mut Context) -> Result<String, LineError> {
-    let mut result = String::new();
-
-    for (num, line) in s.lines().enumerate() {
-        match process_line(line, context) {
-            Ok(result_line) => {
-                result.push_str(&result_line);
-            }
-            Err(e) => {
-                return Err(LineError {
-                    line: num,
-                    error: e,
-                })
-            }
-        };
-    }
-
-    Ok(result)
+pub fn process_str(s: &str, context: &mut Context) -> Result<String, Error> {
+    process_buf(s.as_bytes(), "<string>", context)
 }
 
 /// Process a file.
 ///
-/// This function is a convenience function for `read_to_string` and `process_str`.
-pub fn process_file(filename: &str, context: &mut Context) -> Result<String, LineError> {
-    let file = match fs::read_to_string(filename) {
-        Ok(s) => s,
-        Err(e) => return Err(LineError::from_io(e)),
-    };
-    let old_dir = match env::current_dir() {
-        Ok(s) => s,
-        Err(e) => return Err(LineError::from_io(e)),
-    };
+/// See `process_buf` for more details.
+pub fn process_file(filename: &str, context: &mut Context) -> Result<String, Error> {
+    let file_raw = File::open(filename)?;
+    let file = BufReader::new(file_raw);
+
+    let old_dir = env::current_dir()?;
     let parent_dir = Path::new(filename).parent().unwrap();
     if parent_dir != Path::new("") {
-        if let Err(e) = env::set_current_dir(parent_dir) {
-            return Err(LineError::from_io(e));
-        }
+        env::set_current_dir(parent_dir)?;
     }
-    let result = process_str(&file, context);
-    if let Err(e) = env::set_current_dir(old_dir) {
-        return Err(LineError::from_io(e));
-    }
+
+    let result = process_buf(file, filename, context);
+
+    env::set_current_dir(old_dir)?;
+
     result
 }
 
-/// Process a generic BufRead and write to a generic Write.
+/// Process a generic BufRead.
 ///
-/// This function is exactly like `process_str`, but works for any type that implements std::io::BufRead.
-pub fn process_buf<T: BufRead, R: Write>(
+/// This function is a wrapper around `process_line`. It splits up the input into lines (adding a
+/// newline on the end if there isn't one) and then processes each line.
+pub fn process_buf<T: BufRead>(
     buf: T,
-    result: &mut R,
+    buf_name: &str,
     context: &mut Context,
-) -> Result<(), LineError> {
+) -> Result<String, Error> {
+    let mut result = String::new();
+
     for (num, line) in buf.lines().enumerate() {
-        let line = match line {
-            Ok(line) => line,
-            Err(e) => {
-                return Err(LineError {
-                    line: num,
-                    error: Error::IoError(e),
-                })
-            }
-        };
-        match process_line(&line, context) {
-            Ok(result_line) => {
-                while let Err(e) = result.write(result_line.as_bytes()) {
-                    if e.kind() == io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    return Err(LineError {
-                        line: num,
-                        error: Error::IoError(e),
-                    });
-                }
-            }
-            Err(e) => {
-                return Err(LineError {
-                    line: num,
-                    error: e,
-                })
-            }
-        };
+        let line = line?;
+        let result_line = process_line(&line, context).map_err(|e| Error::FileError {
+            filename: String::from(buf_name),
+            line: num,
+            error: Box::new(e),
+        })?;
+        result.push_str(&result_line);
     }
 
-    Ok(())
+    Ok(result)
 }
