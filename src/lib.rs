@@ -29,6 +29,11 @@
 //! Includes, unlike C, do not require quotes or angle brackets, so this: `#include "file.txt"` or
 //! this: `#include <file.txt>` will not work; you must write `#include file.txt`.
 //!
+//! Also, unlike C the directory does not change when you #include; otherwise, gpp would change its
+//! current directory and wouldn't be thread safe. This means that if you `#include dir/file.txt`
+//! and in `dir/file.txt` it says `#include other_file.txt`, that would refer to `other_file.txt`,
+//! not `dir/other_file.txt`.
+//!
 //! ## Ifs
 //!
 //! The #ifdef, #ifndef, #elifdef, #elifndef, #else and #endif commands work exactly as you expect.
@@ -114,12 +119,10 @@
 mod tests;
 
 use std::collections::HashMap;
-use std::env;
 use std::error;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::string::FromUtf8Error;
 
@@ -549,17 +552,7 @@ pub fn process_file(filename: &str, context: &mut Context) -> Result<String, Err
     let file_raw = File::open(filename)?;
     let file = BufReader::new(file_raw);
 
-    let old_dir = env::current_dir()?;
-    let parent_dir = Path::new(filename).parent().unwrap();
-    if parent_dir != Path::new("") {
-        env::set_current_dir(parent_dir)?;
-    }
-
-    let result = process_buf(file, filename, context);
-
-    env::set_current_dir(old_dir)?;
-
-    result
+    process_buf(file, filename, context)
 }
 
 /// Process a generic BufRead.

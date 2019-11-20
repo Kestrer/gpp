@@ -1,1 +1,1 @@
-#include more.txt
+#include tests/more.txt
