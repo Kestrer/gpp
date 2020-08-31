@@ -21,7 +21,7 @@
 //!
 //! #define works similar to C: `#define [name] [value]`, and #undef too: `#undef [name]`. Be
 //! careful though, because unlike C macro expansion is recursive: if you `#define A A` and then
-//! use A, then gpp will run forever.
+//! use A, gpp will run forever.
 //! If #define is not given a value, then it will default to an empty string.
 //!
 //! ## #include
@@ -59,7 +59,7 @@
 //! #endin
 //! ```
 //! Would output `One, two, three.`. Note that you shouldn't do this, just using `#define tree
-//! three` would be much faster and less platform-dependant. You can also place more commands in
+//! three` would be much faster and less platform-dependent. You can also place more commands in
 //! the in block, including other in blocks. For a useful example:
 //! ```text
 //! <style>
@@ -84,7 +84,7 @@
 //! let mut context = gpp::Context::new();
 //!
 //! // Add a macro to that context manually (context.macros is a HashMap)
-//! context.macros.insert(String::from("my_macro"), String::from("my_value"));
+//! context.macros.insert("my_macro".to_owned(), "my_value".to_owned());
 //!
 //! // Process some text using that
 //! assert_eq!(gpp::process_str("My macro is my_macro\n", &mut context).unwrap(), "My macro is my_value\n");
@@ -123,7 +123,7 @@ use std::error;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command as SystemCommand, ExitStatus, Stdio};
 use std::string::FromUtf8Error;
 
 /// Context of the current processing.
@@ -138,7 +138,7 @@ use std::string::FromUtf8Error;
 /// can set variable names not possible with #defines. However, when replacing variable names in
 /// text the variable name must be surrounded by two characters that are **not** alphanumeric or an
 /// underscore.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Context {
     /// Map of all currently defined macros.
     pub macros: HashMap<String, String>,
@@ -154,53 +154,32 @@ pub struct Context {
 
 impl Context {
     /// Create a new empty context with no macros or inactive stack and exec commands disallowed.
-    pub fn new() -> Context {
-        Context {
-            macros: HashMap::new(),
-            inactive_stack: 0,
-            used_if: false,
-            allow_exec: false,
-            in_stack: Vec::new(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
     /// Create a new empty context with no macros or inactive stack and exec commands allowed.
-    pub fn new_exec() -> Context {
-        Context {
-            macros: HashMap::new(),
-            inactive_stack: 0,
-            used_if: false,
-            allow_exec: true,
-            in_stack: Vec::new(),
+    pub fn new_exec() -> Self {
+        Self::new().exec(true)
+    }
+    /// Create a context from a map of macros.
+    pub fn from_macros(macros: impl Into<HashMap<String, String>>) -> Self {
+        Self {
+            macros: macros.into(),
+            ..Default::default()
         }
     }
-    /// Create a context from an existing HashMap
-    pub fn from_map(macros: HashMap<String, String>) -> Context {
-        Context {
-            macros,
-            inactive_stack: 0,
-            used_if: false,
-            allow_exec: false,
-            in_stack: Vec::new(),
-        }
+    /// Create a context from an iterator over tuples.
+    pub fn from_macros_iter(macros: impl IntoIterator<Item = (String, String)>) -> Self {
+        Self::from_macros(macros.into_iter().collect::<HashMap<_, _>>())
     }
-    /// Create a context from a vector of tuples
-    pub fn from_vec(macros: Vec<(&str, &str)>) -> Context {
-        Context {
-            macros: macros
-                .into_iter()
-                .map(|(name, value)| (name.to_owned(), value.to_owned()))
-                .collect(),
-            inactive_stack: 0,
-            used_if: false,
-            allow_exec: false,
-            in_stack: Vec::new(),
-        }
+    /// Set whther exec commands are allowed.
+    pub fn exec(mut self, allow_exec: bool) -> Self {
+        self.allow_exec = allow_exec;
+        self
     }
 }
 
 /// Error enum for parsing errors.
-///
-/// This type implements std::fmt::Display, and so can easily be printed with println!.
 ///
 /// # Examples
 ///
@@ -210,7 +189,7 @@ impl Context {
 /// ```
 /// ```
 /// let error = gpp::Error::FileError {
-///     filename: String::from("my_file"),
+///     filename: "my_file".to_string(),
 ///     line: 10,
 ///     error: Box::new(gpp::Error::UnexpectedCommand {
 ///         command: "this_command",
@@ -288,15 +267,14 @@ impl From<FromUtf8Error> for Error {
     }
 }
 
-fn shell(cmd: &str) -> Command {
-    let mut command;
-    if cfg!(target_os = "windows") {
-        command = Command::new("cmd");
-        command.args(&["/C", cmd]);
+fn shell(cmd: &str) -> SystemCommand {
+    let (shell, flag) = if cfg!(target_os = "windows") {
+        ("cmd", "/C")
     } else {
-        command = Command::new("sh");
-        command.args(&["-c", cmd]);
-    }
+        ("/bin/sh", "-c")
+    };
+    let mut command = SystemCommand::new(shell);
+    command.args(&[flag, cmd]);
     command
 }
 
@@ -341,15 +319,11 @@ fn process_include(line: &str, context: &mut Context) -> Result<String, Error> {
 }
 
 fn process_define(line: &str, context: &mut Context) -> Result<String, Error> {
-    let (name, value) = match line.find(' ') {
-        Some(index) => line.split_at(index),
-        None => (line, " "),
-    };
-    // remove leading space
-    let value = &value[1..];
-    context
-        .macros
-        .insert(String::from(name), String::from(value));
+    let mut parts = line.splitn(2, ' ');
+    let name = parts.next().unwrap();
+    let value = parts.next().unwrap_or("");
+
+    context.macros.insert(name.to_owned(), value.to_owned());
     Ok(String::new())
 }
 
@@ -404,48 +378,114 @@ fn process_endif(line: &str, context: &mut Context) -> Result<String, Error> {
     Ok(String::new())
 }
 
+#[derive(Clone, Copy)]
+struct Command {
+    name: &'static str,
+    requires_exec: bool,
+    ignored_by_if: bool,
+    execute: fn(&str, &mut Context) -> Result<String, Error>,
+}
+
+const COMMANDS: &[Command] = &[
+    Command {
+        name: "exec",
+        requires_exec: true,
+        ignored_by_if: false,
+        execute: process_exec,
+    },
+    Command {
+        name: "in",
+        requires_exec: true,
+        ignored_by_if: false,
+        execute: process_in,
+    },
+    Command {
+        name: "endin",
+        requires_exec: true,
+        ignored_by_if: false,
+        execute: process_endin,
+    },
+    Command {
+        name: "include",
+        requires_exec: false,
+        ignored_by_if: false,
+        execute: process_include,
+    },
+    Command {
+        name: "define",
+        requires_exec: false,
+        ignored_by_if: false,
+        execute: process_define,
+    },
+    Command {
+        name: "undef",
+        requires_exec: false,
+        ignored_by_if: false,
+        execute: process_undef,
+    },
+    Command {
+        name: "ifdef",
+        requires_exec: false,
+        ignored_by_if: true,
+        execute: |line, context| process_ifdef(line, context, false),
+    },
+    Command {
+        name: "ifndef",
+        requires_exec: false,
+        ignored_by_if: true,
+        execute: |line, context| process_ifdef(line, context, true),
+    },
+    Command {
+        name: "elifdef",
+        requires_exec: false,
+        ignored_by_if: true,
+        execute: |line, context| process_elifdef(line, context, false),
+    },
+    Command {
+        name: "elifndef",
+        requires_exec: false,
+        ignored_by_if: true,
+        execute: |line, context| process_elifdef(line, context, true),
+    },
+    Command {
+        name: "else",
+        requires_exec: false,
+        ignored_by_if: true,
+        execute: process_else,
+    },
+    Command {
+        name: "endif",
+        requires_exec: false,
+        ignored_by_if: true,
+        execute: process_endif,
+    },
+];
+
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-// Checks whether the given string with position pos and length len in s is surrounded by non-word
-// chars; like the regex \B\w+\B.
-fn is_word(s: &str, pos: usize, len: usize) -> bool {
-    let mut prev_char = pos;
-    if prev_char != 0 {
-        prev_char -= 1;
-        while !s.is_char_boundary(prev_char) {
-            prev_char -= 1;
-        }
-    }
-    if pos > 0 && is_word_char(s[prev_char..pos].chars().next().unwrap()) {
-        return false;
-    }
-    if pos + len < s.len() && is_word_char(s[pos + len..].chars().next().unwrap()) {
-        return false;
-    }
-    true
-}
-
-// Finds the next macro name word in the line, and replaces it with its value, returning None when
-// it can't find a macro.
+/// Finds the next macro name word in the line, and replaces it with its value, returning None when
+/// it can't find a macro.
 fn replace_next_macro(line: &str, macros: &HashMap<String, String>) -> Option<String> {
-    for (name, value) in macros {
-        let index = match line.find(name) {
-            Some(i) => i,
-            None => continue,
-        };
-        if !is_word(line, index, name.len()) {
-            continue;
+    macros.iter().find_map(|(name, value)| {
+        let mut parts = line.splitn(2, name);
+        let before = parts.next().unwrap();
+        let after = parts.next()?;
+
+        dbg!(before.chars().next_back(), after.chars().next());
+
+        if before.chars().next_back().map_or(false, is_word_char)
+            || after.chars().next().map_or(false, is_word_char)
+        {
+            return None;
         }
-        let mut new_line = String::new();
-        new_line.reserve(line.len() - name.len() + value.len());
-        new_line.push_str(&line[..index]);
+        let mut new_line = String::with_capacity(before.len() + value.len() + after.len());
+        new_line.push_str(before);
         new_line.push_str(value);
-        new_line.push_str(&line[index + name.len()..]);
-        return Some(new_line);
-    }
-    None
+        new_line.push_str(after);
+        Some(new_line)
+    })
 }
 
 /// Process a string line of input.
@@ -473,63 +513,68 @@ fn replace_next_macro(line: &str, macros: &HashMap<String, String>) -> Option<St
 /// assert_eq!(context.macros.get("Foo").unwrap(), "Bar");
 /// ```
 pub fn process_line(line: &str, context: &mut Context) -> Result<String, Error> {
-    let mut chars = line.chars();
-    let first = chars.next();
-    let second = chars.next();
-    let line = if first == Some('#') && second != Some('#') {
-        let after_hash = line[1..].trim_start();
-        let (command, content) = match after_hash.find(' ') {
-            Some(index) => after_hash.split_at(index),
-            None => (after_hash, ""),
-        };
-        let content = content.trim_start();
-        match command {
-            "exec" if context.inactive_stack == 0 && context.allow_exec => {
-                process_exec(content, context)
-            }
-            "in" if context.inactive_stack == 0 && context.allow_exec => {
-                process_in(content, context)
-            }
-            "endin" if context.inactive_stack == 0 && context.allow_exec => {
-                process_endin(content, context)
-            }
-            "include" if context.inactive_stack == 0 => process_include(content, context),
-            "define" if context.inactive_stack == 0 => process_define(content, context),
-            "undef" if context.inactive_stack == 0 => process_undef(content, context),
-            "ifdef" => process_ifdef(content, context, false),
-            "ifndef" => process_ifdef(content, context, true),
-            "elifdef" => process_elifdef(content, context, false),
-            "elifndef" => process_elifdef(content, context, true),
-            "else" => process_else(content, context),
-            "endif" => process_endif(content, context),
-            command => Err(Error::InvalidCommand {
-                command_name: command.to_owned(),
-            }),
-        }?
-    } else {
-        if context.inactive_stack > 0 {
-            return Ok(String::new());
-        }
-        let mut line = String::from(if first == Some('#') && second == Some('#') {
-            &line[1..]
+    let line = line
+        .strip_suffix("\r\n")
+        .or_else(|| line.strip_suffix('\n'))
+        .unwrap_or(line);
+
+    enum Line<'a> {
+        Text(&'a str),
+        Command(Command, &'a str),
+    }
+
+    let line = if let Some(rest) = line.strip_prefix('#') {
+        if rest.starts_with('#') {
+            Line::Text(rest)
         } else {
-            line
-        });
-        while let Some(s) = replace_next_macro(&line, &context.macros) {
-            line = s;
+            let mut parts = rest.trim_start().splitn(2, ' ');
+            let command_name = parts.next().unwrap();
+            let content = parts.next().unwrap_or("").trim_start();
+
+            Line::Command(
+                COMMANDS
+                    .iter()
+                    .copied()
+                    .filter(|command| context.allow_exec || !command.requires_exec)
+                    .find(|command| command.name == command_name)
+                    .ok_or_else(|| Error::InvalidCommand {
+                        command_name: command_name.to_owned(),
+                    })?,
+                content,
+            )
         }
-        if line.chars().rev().next() != Some('\n') {
-            line.push('\n');
-        }
-        line
+    } else {
+        Line::Text(line)
     };
-    if let Some(child) = context.in_stack.last_mut() {
+
+    let line = match line {
+        Line::Text(_)
+        | Line::Command(
+            Command {
+                ignored_by_if: false,
+                ..
+            },
+            _,
+        ) if context.inactive_stack > 0 => String::new(),
+        Line::Text(text) => {
+            let mut line = format!("{}\n", text);
+
+            while let Some(s) = replace_next_macro(&line, &context.macros) {
+                line = s;
+            }
+
+            line
+        }
+        Line::Command(command, content) => (command.execute)(content, context)?,
+    };
+
+    Ok(if let Some(child) = context.in_stack.last_mut() {
         let input = child.stdin.as_mut().ok_or(Error::PipeFailed)?;
         input.write_all(line.as_bytes())?;
-        Ok(String::new())
+        String::new()
     } else {
-        Ok(line)
-    }
+        line
+    })
 }
 
 /// Process a multi-line string of text.
@@ -564,17 +609,16 @@ pub fn process_buf<T: BufRead>(
     buf_name: &str,
     context: &mut Context,
 ) -> Result<String, Error> {
-    let mut result = String::new();
-
-    for (num, line) in buf.lines().enumerate() {
-        let line = line?;
-        let result_line = process_line(&line, context).map_err(|e| Error::FileError {
-            filename: String::from(buf_name),
-            line: num,
-            error: Box::new(e),
-        })?;
-        result.push_str(&result_line);
-    }
-
-    Ok(result)
+    buf.lines()
+        .enumerate()
+        .map(|(num, line)| {
+            Ok({
+                process_line(&line?, context).map_err(|e| Error::FileError {
+                    filename: String::from(buf_name),
+                    line: num,
+                    error: Box::new(e),
+                })?
+            })
+        })
+        .collect()
 }

@@ -1,9 +1,7 @@
 #[test]
 fn substitution() {
     let mut context = crate::Context::new();
-    context
-        .macros
-        .insert(String::from("Foo"), String::from("Bar"));
+    context.macros.insert("Foo".to_string(), "Bar".to_string());
 
     assert_eq!(crate::process_str("Foo", &mut context).unwrap(), "Bar\n");
     assert_eq!(
@@ -37,9 +35,7 @@ fn define() {
 #[test]
 fn context() {
     let mut context = crate::Context::new();
-    context
-        .macros
-        .insert(String::from("$Foo"), String::from("1"));
+    context.macros.insert("$Foo".to_string(), "1".to_string());
     assert_eq!(crate::process_str("$Foo", &mut context).unwrap(), "1\n");
     assert_eq!(
         crate::process_str("#define $Foo 2", &mut context).unwrap(),
