@@ -7,7 +7,7 @@ fn main() -> Result<(), gpp::Error> {
     let matches = App::new("gpp")
         .version("0.6.0")
         .about("A Generic PreProcessor.")
-        .author("Koxiaet")
+        .author("Kestrer")
         .arg(Arg::with_name("allow_exec")
             .help("Whether #exec and #in commands are allowed")
             .short("-e")

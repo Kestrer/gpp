@@ -1,10 +1,10 @@
 [package]
 name = "gpp"
 description = "A generic C-like preprocessor for Rust."
-repository = "https://github.com/Koxiaet/gpp"
+repository = "https://github.com/Kestrer/gpp"
 license = "MIT OR Apache-2.0"
 version = "0.6.0"
-authors = ["Koxiaet"]
+authors = ["Kestrer <kestrer.dev@gmail.com>"]
 edition = "2018"
 
 [lib]
