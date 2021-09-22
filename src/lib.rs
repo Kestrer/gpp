@@ -473,8 +473,6 @@ fn replace_next_macro(line: &str, macros: &HashMap<String, String>) -> Option<St
         let before = parts.next().unwrap();
         let after = parts.next()?;
 
-        dbg!(before.chars().next_back(), after.chars().next());
-
         if before.chars().next_back().map_or(false, is_word_char)
             || after.chars().next().map_or(false, is_word_char)
         {
