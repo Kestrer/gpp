@@ -5,7 +5,7 @@ use clap::{App, Arg};
 
 fn main() -> Result<(), gpp::Error> {
     let matches = App::new("gpp")
-        .version("0.6.0")
+        .version("0.6.2")
         .about("A Generic PreProcessor.")
         .author("Kestrer")
         .arg(Arg::with_name("allow_exec")
