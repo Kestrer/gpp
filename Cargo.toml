@@ -5,7 +5,7 @@ repository = "https://github.com/Kestrer/gpp"
 license = "MIT OR Apache-2.0"
 version = "0.6.2"
 authors = ["Kestrer <kestrer.dev@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [lib]
 name = "gpp"
