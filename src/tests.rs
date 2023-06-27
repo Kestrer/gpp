@@ -182,11 +182,11 @@ dogs"
 #[test]
 fn literal_hash() {
     assert_eq!(
-        crate::process_str(" ## literal hash", &mut crate::Context::new()).unwrap(),
-        " ## literal hash\n"
+        crate::process_str("## literal hash", &mut crate::Context::new()).unwrap(),
+        "## literal hash\n"
     );
     assert_eq!(
-        crate::process_str("## literal hash", &mut crate::Context::new()).unwrap(),
-        "# literal hash\n"
+        crate::process_str("#* literal hash", &mut crate::Context::new()).unwrap(),
+        "#* literal hash\n"
     );
 }

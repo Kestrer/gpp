@@ -521,25 +521,19 @@ pub fn process_line(line: &str, context: &mut Context) -> Result<String, Error> 
         Command(Command, &'a str),
     }
 
-    let line = if let Some(rest) = line.strip_prefix('#') {
-        if rest.starts_with('#') {
-            Line::Text(rest)
-        } else {
-            let mut parts = rest.trim_start().splitn(2, ' ');
-            let command_name = parts.next().unwrap();
-            let content = parts.next().unwrap_or("").trim_start();
-
-            Line::Command(
-                COMMANDS
-                    .iter()
-                    .copied()
-                    .filter(|command| context.allow_exec || !command.requires_exec)
-                    .find(|command| command.name == command_name)
-                    .ok_or_else(|| Error::InvalidCommand {
-                        command_name: command_name.to_owned(),
-                    })?,
-                content,
-            )
+    let line = if line.starts_with('#') {
+        let rest = line.strip_prefix('#').unwrap();
+        let mut parts = rest.trim_start().splitn(2, ' ');
+        let command_name = parts.next().unwrap();
+        let content = parts.next().unwrap_or("").trim_start();
+        match COMMANDS
+            .iter()
+            .copied()
+            .filter(|command| context.allow_exec || !command.requires_exec)
+            .find(|command| command.name == command_name)
+        {
+            Some(cmd) => Line::Command(cmd, content),
+            None => Line::Text(line),
         }
     } else {
         Line::Text(line)
